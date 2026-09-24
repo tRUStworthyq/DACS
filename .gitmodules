@@ -1,0 +1,6 @@
+[submodule "core"]
+	path = core
+	url = https://github.com/tRUStworthyq/core.git
+[submodule "gateway"]
+	path = gateway
+	url = https://github.com/tRUStworthyq/gateway.git
