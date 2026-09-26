@@ -1,0 +1,37 @@
+{
+  "realm": "DACS",
+  "enabled": true,
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "clients": [
+    {
+      "clientId": "gateway",
+      "enabled": true,
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "dev-client-secret-local-only",
+      "redirectUris": ["http://localhost:3000/*", "http://localhost:8765/*"],
+      "webOrigins": ["http://localhost:3000", "http://localhost:8765/*"],
+      "protocol": "openid-connect",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true
+    }
+  ],
+  "roles": {
+    "realm": [
+      { "name": "user" },
+      { "name": "admin" }
+    ]
+  },
+  "users": [
+    {
+      "username": "testuser",
+      "enabled": true,
+      "email": "test@example.com",
+      "credentials": [
+        { "type": "password", "value": "testpass123", "temporary": false }
+      ],
+      "realmRoles": ["user"]
+    }
+  ]
+}

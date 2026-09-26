@@ -40,3 +40,4 @@ build/
 
 .idea
 .claude
+infra/keycloak/certs
