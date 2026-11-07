@@ -3,7 +3,7 @@ import allure
 
 @allure.title("получение всех чатов пользователя")
 @allure.severity(allure.severity_level.CRITICAL)
-def test_get_capi_chats(api_session, api_base_url):
+def test_get_api_chats(api_session, api_base_url):
     with allure.step("формирование url"):
         url = f"{api_base_url}/api/chats"
         response = api_session.get(url)

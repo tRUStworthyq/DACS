@@ -83,3 +83,8 @@ def api_session():
     finally:
         core_session.close()
         keycloak_session.close()
+
+
+@pytest.fixture(scope="function")
+def api_base_url():
+    return BASE_URL
