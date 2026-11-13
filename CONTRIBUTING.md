@@ -96,11 +96,12 @@ git config --global submodule.recurse true
    ```bash
    git checkout master
    git pull
-   git checkout -b chore/bump-service-a
-   git submodule update --remote service-a
-   git add service-a
-   git commit -m "chore: bumped service-a"
-   git push -u origin chore/bump-service-a
+   git checkout -b chore/bump-services
+   git submodule update --remote core
+   git submodule update --remote gateway
+   git add .
+   git commit -m "chore: bumped services"
+   git push -u origin chore/bump-services
    ```
 3. Откройте PR в основной репозиторий и пройдите обычное ревью.
 
