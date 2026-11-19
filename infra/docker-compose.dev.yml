@@ -33,6 +33,7 @@ services:
       KC_DB_PASSWORD: keycloak_pass
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin
+      DACS_HOME_URL: ${DACS_HOME_URL:-http://localhost:8765/}
       KC_HOSTNAME: keycloak
       KC_HOSTNAME_STRICT: "false"
       KC_HTTP_ENABLED: "true"
@@ -45,6 +46,7 @@ services:
     volumes:
       - ./keycloak/certs:/opt/keycloak/certs:ro
       - ./keycloak/import:/opt/keycloak/data/import:ro
+      - ./keycloak/themes/dacs:/opt/keycloak/themes/dacs:ro
     ports:
       - "8080:8080"
       - "8443:8443"
@@ -73,11 +75,20 @@ services:
       KEYCLOAK_PORT: "8443" # 8080
       SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_KEYCLOAK_CLIENT_SECRET: "dev-client-secret-local-only"
       CORE_BASE_URL: http://core:8082
+      FRONTEND_BASE_URL: http://frontend:8080
     ports:
       - "8765:8765"
     depends_on:
       keycloak:
         condition: service_healthy
+      frontend:
+        condition: service_started
+    networks:
+      - keycloak-net
+
+  frontend:
+    build:
+      context: ../dacs-frontend
     networks:
       - keycloak-net
 
@@ -106,7 +117,9 @@ services:
     container_name: core
     environment:
       OLLAMA_BASE_URL: http://ollama:11434
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:8b}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-dacs-qwen3}
+      OLLAMA_CONTEXT_TOKENS: ${OLLAMA_CONTEXT_TOKENS:-8192}
+      OLLAMA_MAX_OUTPUT_TOKENS: ${OLLAMA_MAX_OUTPUT_TOKENS:-1024}
       SPRING_DATASOURCE_URL: jdbc:postgresql://core-db:5432/core
       SPRING_DATASOURCE_USERNAME: core
       SPRING_DATASOURCE_PASSWORD: core_pass
@@ -189,6 +202,10 @@ services:
   ollama:
     image: ollama/ollama:latest
     restart: unless-stopped
+    environment:
+      OLLAMA_FLASH_ATTENTION: "1"
+      OLLAMA_KV_CACHE_TYPE: q8_0
+      OLLAMA_NUM_PARALLEL: "1"
     ports:
       - "127.0.0.1:11434:11434"
     volumes:
@@ -206,10 +223,21 @@ services:
     restart: 'on-failure:3'
     entrypoint: ["/bin/sh", "-ec"]
     command:
-      - ollama show "$$OLLAMA_MODEL" >/dev/null 2>&1 || exec ollama pull "$$OLLAMA_MODEL"
+      - |
+        if [ "$$OLLAMA_MODEL" = dacs-qwen3 ]; then
+          ollama show qwen3:4b-instruct-2507-q4_K_M >/dev/null 2>&1 || ollama pull qwen3:4b-instruct-2507-q4_K_M
+          ollama create "$$OLLAMA_MODEL" -f /dacs/Modelfile
+        else
+          ollama show "$$OLLAMA_MODEL" >/dev/null 2>&1 || ollama pull "$$OLLAMA_MODEL"
+        fi
+        if [ "$$OLLAMA_PREWARM" = 1 ]; then
+          exec ollama run "$$OLLAMA_MODEL" ""
+        fi
     environment:
       OLLAMA_HOST: http://ollama:11434
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:8b}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-dacs-qwen3}
+    volumes:
+      - ./ollama/Modelfile:/dacs/Modelfile:ro
     depends_on:
       ollama:
         condition: service_healthy

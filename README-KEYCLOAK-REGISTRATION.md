@@ -15,9 +15,9 @@ chmod +x infra/keycloak/enable-registration.sh
 
 После успешного выполнения:
 
-1. Откройте `http://localhost:5173/register`.
+1. Откройте `http://localhost:8765/register`.
 2. Нажмите «Открыть страницу регистрации».
 3. На странице входа Keycloak выберите ссылку `Register` / «Регистрация».
 4. Заполните данные. При необходимости после регистрации отдельно войдите через `/login`.
 
-OAuth2-вход остаётся прежним: frontend открывает Gateway `/oauth2/authorization/keycloak` в новой вкладке. Данные сессии остаются на `localhost`, поэтому вкладка DACS может использовать их для запросов через Vite proxy.
+Frontend открывает Gateway `/oauth2/authorization/keycloak` в текущей вкладке. После входа Gateway возвращает пользователя на главную по адресу `http://localhost:8765/`.

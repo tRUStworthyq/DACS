@@ -2,7 +2,17 @@
 
 React + TypeScript + Vite frontend for DACS. The UI is connected to the existing Core API through the existing Gateway; Keycloak authentication remains unchanged.
 
-## Run locally
+## Run with Docker Compose
+
+From the repository root:
+
+```bash
+docker compose -f infra/docker-compose.dev.yml up -d --build
+```
+
+Open `http://localhost:8765/`. Gateway serves the UI and routes `/api/**` to Core using the browser's Gateway session. After sign-in through Keycloak, Gateway returns the current tab to `/`.
+
+## Run with Vite
 
 Requirements: Node.js 20+ and npm. Start the backend stack first. Gateway should be available at `http://localhost:8765`.
 
@@ -22,7 +32,7 @@ No CORS or Java backend changes are required for local development. Vite proxies
 - `/login/oauth2/**` → Gateway OAuth2 callback
 - `/logout` → Gateway logout route
 
-The browser sends requests to the Vite origin. The API client includes credentials and does not follow an OAuth redirect inside an API fetch. To sign in, open `/login` and click **Войти через Keycloak**. Gateway starts the existing OAuth2 flow. After successful login, return to the DACS tab and retry the request if the screen was already open.
+The browser sends requests to the Vite origin. The API client includes credentials and does not follow an OAuth redirect inside an API fetch. To sign in, open `/login` and click **Войти через Keycloak**. Gateway starts the existing OAuth2 flow. After sign-in, Gateway opens its home page at `http://localhost:8765/`.
 
 ## Connected Core endpoints
 
@@ -39,7 +49,14 @@ The browser sends requests to the Vite origin. The API client includes credentia
 
 `config` is sent as a JSON string, matching the current DTO. The create/edit forms validate JSON syntax locally. Connector-specific fields are not guessed.
 
-The run endpoint publishes an event to the configured Kafka topic and returns `202 Accepted`. This confirms request acceptance by Core, not completion of collection. The current `agents` repository contains only the application bootstrap and does not yet contain a Kafka consumer, so an end-to-end collection run is not currently demonstrated by this frontend integration.
+The launch endpoint returns a `requestId` and opens the status view for that run. The run picker uses `GET /api/collect/{implId}/runs?offset=0&limit=25`, scoped to the selected connection and user. The UI polls run status while it is queued or running.
+
+### Reports, tree and archive
+
+- File scores come from `GET /api/collect/runs/{requestId}/aging`.
+- Personal-data reports use `GET /api/collect/runs/{requestId}/pii/summary` and `/pii/files`.
+- The S3 tree uses the stored metadata endpoints under `/api/impls/{id}/s3/buckets`, one folder level and page at a time.
+- Archive actions use `/api/impls/{id}/s3/archive`. Creating a copy and deleting both the source and archive copy require explicit confirmation in the UI.
 
 ### Chats and messages
 
@@ -48,15 +65,11 @@ The run endpoint publishes an event to the configured Kafka topic and returns `2
 - `GET /api/chats/{chatId}` — get chat details.
 - `DELETE /api/chats/{chatId}` — delete a chat and its messages (HTTP 204).
 - `GET /api/chats/{chatId}/messages?limit=40&cursor=...` — cursor-paginated history.
-- `POST /api/chats/{chatId}/messages` — store a user message using `{ content }`.
+- `POST /api/chats/{chatId}/messages` — send a message using `{ content, requestId? }`. The optional ID attaches a completed run.
 - `PATCH /api/chats/{chatId}/messages/{messageId}` — edit a user message using `{ content }`.
 - `DELETE /api/chats/{chatId}/messages/{messageId}` — soft-delete a message (HTTP 204).
 
-The current chat endpoints store and return messages; they do not themselves generate AI responses. `POST /api/chats` creates the chat with the default title `New chat` and immediately saves the provided first message. Per current Core logic, editing a message soft-deletes all later messages in that conversation; the UI asks for confirmation before doing this.
-
-## Sections without current Core endpoints
-
-Policies, dependency graph, recommendations and archive are still shown as unavailable. No corresponding controllers/endpoints were found in the current Core repository. Storage-volume, freshness and recommendation metrics are not fabricated.
+The UI uses `POST /api/chats/stream` for the first message and `POST /api/chats/{chatId}/messages/stream` for subsequent messages. Both accept `{ content, requestId? }`. A completed run may be attached to either request. The SSE response carries `phase`, `delta`, `done`, and `error` events. A `done` event includes the chat ID after the user message and agent reply are persisted. The existing non-streaming endpoints are available for other clients. Editing a message soft-deletes later messages in the conversation.
 
 ## Build
 
@@ -71,7 +84,7 @@ Local development uses the Vite proxy and does not use `VITE_API_BASE_URL`. For 
 
 ## Registration
 
-The `/register` page opens the existing Gateway OAuth2 entry point in a new tab. When self-registration is enabled in Keycloak realm `DACS`, the Keycloak login page displays its built-in Register link. The frontend does not create a local password or store credentials.
+The `/register` page opens the existing Gateway OAuth2 entry point in the current tab. When self-registration is enabled in Keycloak realm `DACS`, the Keycloak login page displays its built-in Register link. The frontend does not create a local password or store credentials.
 
 To enable registration in an existing local Keycloak realm, run from the DACS repository root:
 
@@ -81,4 +94,4 @@ bash infra/keycloak/enable-registration.sh
 
 The archive also includes `README-KEYCLOAK-REGISTRATION.md` with the full local setup instructions. The Keycloak realm import file sets `registrationAllowed: true` for future fresh imports.
 
-`VITE_GATEWAY_ORIGIN` defaults to `http://localhost:8765` and is used for the external login/register tab. Override it for a different Gateway host.
+`VITE_GATEWAY_ORIGIN` defaults to `http://localhost:8765` in Vite development. The Compose build uses a same-origin login URL.

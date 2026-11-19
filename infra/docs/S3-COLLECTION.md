@@ -89,3 +89,19 @@ API скоринга возвращает страницы всех файлов
 - `GET /api/collect/runs/{requestId}/pii/files?status=FINDINGS&category=EMAIL&offset=0&limit=50` возвращает `items` и `nextOffset`. По умолчанию `FINDINGS` включает `DETECTED` и `REVIEW_REQUIRED`. Для всех файлов используйте `ALL`. Можно передать один из семи статусов детектора. Фильтр категории необязателен и принимает `EMAIL`, `PHONE_RU`, `SNILS`, `INN_12` или `PASSPORT_RU`.
 
 Запись файла содержит имя, путь, статус, категории, методы обнаружения, `scanComplete` и `scannerVersion`. Исторические записи без классификации учитываются как `NOT_SCANNED`, а полнота и версия для них равны `null`. Для `NOT_DETECTED` используйте подпись «Признаки не обнаружены». Поле `retentionStatus` со значением `NEEDS_DETERMINATION` означает «Требуется определить». Поле `graph` содержит `implId`, `bucket`, `prefix` и `key` для перехода в папку файла. Граф показывает последний успешный сбор Impl, поэтому файл из более раннего сбора может отсутствовать в дереве.
+## Видимость удалённых файлов
+
+После успешного `DELETE` Core сохраняет отметку об удалении. Граф, исходный список результатов, рекомендации и списки и сводки ПДн исключают этот путь из сборов, начатых до удаления. Если объект создадут снова по тому же ключу, его покажет новый сбор. Запись `DELETED` в архиве и исходные батчи остаются в истории.
+
+## Ollama на NVIDIA GPU
+
+Для dev-стенда на хосте с доступной NVIDIA GPU:
+
+```powershell
+docker compose -f infra/docker-compose.dev.yml -f infra/docker-compose.gpu.yml up -d ollama
+docker compose -f infra/docker-compose.dev.yml -f infra/docker-compose.gpu.yml run --rm -T ollama-init
+docker compose -f infra/docker-compose.dev.yml -f infra/docker-compose.gpu.yml up -d --build core
+```
+
+`ollama-init` создаёт `dacs-qwen3` из Qwen3 4B Instruct 2507 по [Modelfile](../ollama/Modelfile). Размер контекста Core задаёт `OLLAMA_CONTEXT_TOKENS` (8192), предел ответа — `OLLAMA_MAX_OUTPUT_TOKENS` (1024). После первого запроса `docker compose -f infra/docker-compose.dev.yml -f infra/docker-compose.gpu.yml exec ollama ollama ps` покажет фактическое распределение вычислений. Полный перенос требует свободной памяти GPU для модели и контекста. GPU-профиль прогревает модель на этапе ollama-init. Обычный Compose запускается без GPU.
+Если в сборе до 20 видимых файлов и все имеют рекомендацию «Сохранить», Core отвечает «Проверенные файлы в порядке» сразу после скоринга. Пустой сбор получает отдельный ответ. Если найдены замечания или в сборе больше файлов, агент получает компактные страницы скоринга с замечаниями, числом просмотренных файлов и признаком следующей страницы.

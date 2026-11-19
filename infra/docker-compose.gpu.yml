@@ -1,0 +1,6 @@
+services:
+  ollama:
+    gpus: all
+  ollama-init:
+    environment:
+      OLLAMA_PREWARM: "1"
