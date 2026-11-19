@@ -103,3 +103,15 @@ docker compose -f docker-compose.dev.yml up -d --build
 - **`GlobalFilter` не применяется к запросам, обработанным напрямую контроллером** — только к тем, что реально прошли через `Route`. Если нужен фильтр для всех запросов без исключения — использовать `WebFilter`, а не `GlobalFilter`.
 - **`spring-boot-starter-web` и `spring-boot-starter-webflux`/Gateway несовместимы в одном модуле** — Spring Boot может собрать сервлетный контекст вместо реактивного, из-за чего вся маршрутизация Gateway перестаёт работать (симптом: `Tomcat` в логе вместо `Netty`, классическая Whitelabel Error Page вместо JSON-ошибок).
 - **JVM внутри контейнера не доверяет самоподписанным сертификатам от mkcert по умолчанию** — нужно вручную импортировать `rootCA.pem` в `cacerts` образа (см. раздел 3).
+## Ollama в dev-compose
+
+Compose запускает Ollama и отдельную задачу `ollama-init`, которая загружает `qwen3:8b` в постоянный том. Первичная загрузка модели занимает несколько гигабайт. Проверка готовности Ollama и статус загрузки модели доступны раздельно:
+
+```powershell
+docker compose -f infra/docker-compose.dev.yml logs -f ollama-init
+docker compose -f infra/docker-compose.dev.yml exec ollama ollama list
+```
+
+`core` отправляет запросы через Spring AI на `http://ollama:11434`. Для прямого локального запуска `core` по умолчанию используется `http://localhost:11434`. Адрес и модель задаются переменными `OLLAMA_BASE_URL` и `OLLAMA_MODEL`.
+
+После загрузки модели отправьте `POST /api/chats/{chatId}/messages` с `{"content":"..."}`. Агент получает последние 30 активных сообщений чата и новый запрос. POST возвращает созданное сообщение `USER`. Сохранённый ответ `AGENT` доступен через `GET /api/chats/{chatId}/messages`. Если модель недоступна, запрос вернёт `502`. Если за время генерации изменилась история, запрос вернёт `409`. В обоих случаях новый обмен сообщениями не сохраняется.
