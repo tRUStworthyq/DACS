@@ -52,6 +52,8 @@ services:
     depends_on:
       keycloak-db:
         condition: service_healthy
+
+
     healthcheck:
       test: [ "CMD-SHELL", "exec 3<>/dev/tcp/localhost/9000 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && cat <&3 | grep -q '200 OK'" ]
       interval: 10s
@@ -103,6 +105,8 @@ services:
       dockerfile: deploy/Dockerfile
     container_name: core
     environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:8b}
       SPRING_DATASOURCE_URL: jdbc:postgresql://core-db:5432/core
       SPRING_DATASOURCE_USERNAME: core
       SPRING_DATASOURCE_PASSWORD: core_pass
@@ -130,6 +134,12 @@ services:
     container_name: agents
     ports:
       - "8083:8083"
+    environment:
+      AGENTS_PII_ENABLED: ${AGENTS_PII_ENABLED:-false}
+      AGENTS_PII_CHUNK_OVERLAP_CHARS: ${AGENTS_PII_CHUNK_OVERLAP_CHARS:-256}
+      AGENTS_PII_MAX_SCAN_BYTES: ${AGENTS_PII_MAX_SCAN_BYTES:-104857600}
+      AGENTS_PII_ENABLED_DETECTORS: ${AGENTS_PII_ENABLED_DETECTORS:-EMAIL,PHONE_RU,SNILS,INN_12,PASSPORT_RU}
+      MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE: health,metrics
     depends_on:
       kafka:
         condition: service_healthy
@@ -176,6 +186,56 @@ services:
       - keycloak-net
 
 
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - keycloak-net
+
+  ollama-init:
+    image: ollama/ollama:latest
+    restart: 'on-failure:3'
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - ollama show "$$OLLAMA_MODEL" >/dev/null 2>&1 || exec ollama pull "$$OLLAMA_MODEL"
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:8b}
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - keycloak-net
+
+  minio:
+    build: ./minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "127.0.0.1:9100:9000"
+      - "127.0.0.1:9101:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/minio/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - keycloak-net
+
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
     container_name: kafka-ui
@@ -202,6 +262,8 @@ volumes:
   keycloak_db_data:
   core_db_data:
   kafka_data:
+  minio_data:
+  ollama_data:
 
 networks:
   keycloak-net:
