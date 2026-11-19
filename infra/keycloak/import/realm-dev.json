@@ -2,7 +2,7 @@
   "realm": "DACS",
   "enabled": true,
   "sslRequired": "external",
-  "registrationAllowed": false,
+  "registrationAllowed": true,
   "clients": [
     {
       "clientId": "gateway",
