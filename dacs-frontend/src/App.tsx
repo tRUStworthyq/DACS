@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import { Link, Route, Routes } from 'react-router-dom'
 import { ApiError, KEYCLOAK_LOGIN_URL, requestJson, requestVoid, streamChat } from './api'
-import { ArchivePage, ConnectionPicker, GraphPage, ResultsPage, RunPicker, S3_SOURCE } from './ResultsPages'
-import type { Connection, GraphLocation, RunStatus } from './ResultsPages'
+import { ArchivePage, ConnectionPicker, GraphPage, ResultsPage, RunPicker, TemplatesPage, FILE_STORAGE_SOURCE, S3_SOURCE, supportsCollection } from './ResultsPages'
+import type { Connection, RunStatus } from './ResultsPages'
 import {
   AlertCircle,
   Archive,
@@ -30,7 +30,7 @@ import {
   X,
 } from 'lucide-react'
 
-type Section = 'overview' | 'sources' | 'chats' | 'pii' | 'dependencies' | 'recommendations' | 'archive'
+type Section = 'overview' | 'sources' | 'chats' | 'pii' | 'templates' | 'dependencies' | 'recommendations' | 'archive'
 type SourceRecord = { id: string; name: string }
 type ImplState = 'NOT_RUN' | 'FIRST_RUN_DONE' | string
 type ImplRecord = { id: string; name: string; config: string; state: ImplState; sourceId: string }
@@ -59,6 +59,7 @@ const navigation: { id: Section; label: string; icon: typeof LayoutDashboard }[]
   { id: 'sources', label: 'Источники данных', icon: Database },
   { id: 'chats', label: 'Диалоги', icon: MessageSquare },
   { id: 'pii', label: 'Персональные данные', icon: ShieldCheck },
+  { id: 'templates', label: 'Шаблоны документов', icon: FileSearch },
   { id: 'dependencies', label: 'Граф зависимостей', icon: GitBranch },
   { id: 'recommendations', label: 'Рекомендации', icon: FileSearch },
   { id: 'archive', label: 'Архив', icon: Archive },
@@ -190,14 +191,14 @@ function EmptyPanel({ icon: Icon, title, description, action }: { icon: typeof D
 }
 
 function Overview({ data, onNavigate }: { data: ReturnType<typeof useSourceData>; onNavigate: (section: Section) => void }) {
-  const connections = data.implementations.filter(item => item.sourceId === S3_SOURCE)
+  const connections = data.implementations.filter(item => supportsCollection(item.sourceId))
   return <>
     <PageHeading eyebrow="РАБОЧЕЕ ПРОСТРАНСТВО" title={<>Контроль старения <span>данных.</span></>}
-      description="Сбор, проверка и архивирование файлов S3."
+      description="Сбор и проверка файлов из S3 и файловой системы."
       action={<button className="button button-dark" type="button" onClick={() => onNavigate('sources')}>Открыть источники <ArrowRight size={15} /></button>} />
     {data.error && <ApiNotice kind={data.errorKind} message={data.error} onRetry={() => void data.refresh()} />}
     {!data.error && <section className="metrics-grid" aria-label="Подключения">
-      <StatCard label="Подключения S3" value={data.loading ? '…' : String(connections.length)} hint="Настроенные бакеты" icon={Database} />
+      <StatCard label="Подключения" value={data.loading ? '…' : String(connections.length)} hint="Источники данных" icon={Database} />
     </section>}
     <section className="panel overview-sources-panel">
       <div className="panel-header"><h2>Подключённые источники</h2>
@@ -205,7 +206,7 @@ function Overview({ data, onNavigate }: { data: ReturnType<typeof useSourceData>
       </div>
       {data.loading ? <p className="loading-row">Загрузка…</p> : connections.length > 0
         ? <div className="source-chip-list">{connections.map(item => <span className="source-chip" key={item.id}><Database size={14} />{item.name}</span>)}</div>
-        : !data.error && <p className="empty-note">Добавьте подключение S3, чтобы начать сбор.</p>}
+        : !data.error && <p className="empty-note">Добавьте подключение, чтобы начать сбор.</p>}
     </section>
   </>
 }
@@ -298,16 +299,20 @@ function ImplDialog({ sources, existing, onClose, onSaved }: { sources: SourceRe
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const isS3 = sourceId === S3_SOURCE
+  const isFileStorage = sourceId === FILE_STORAGE_SOURCE
+  const [directory, setDirectory] = useState(typeof original.directory === 'string' ? original.directory : '.')
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (saving) return
     setError('')
     if (!name.trim()) { setError('Укажите название подключения.'); return }
-    if (!editing && !isS3) { setError('Выберите источник с поддерживаемым подключением.'); return }
+    if (!editing && !supportsCollection(sourceId)) { setError('Выберите источник с поддерживаемым подключением.'); return }
     setSaving(true)
     try {
-      const config = isS3 ? serializeS3(fields, original) : existing?.config
+      if (isFileStorage && !directory.trim()) throw new Error('Укажите каталог.')
+      const config = isS3 ? serializeS3(fields, original)
+        : isFileStorage ? JSON.stringify({ directory: directory.trim() }) : existing?.config
       if (existing) {
         await requestJson<ImplRecord>('/api/impls/' + existing.id, {
           method: 'PUT', body: JSON.stringify({ name: name.trim(), config, state: existing.state }),
@@ -351,8 +356,8 @@ function ImplDialog({ sources, existing, onClose, onSaved }: { sources: SourceRe
             <select value={sourceId} onChange={event => setSourceId(event.target.value)} disabled={editing || saving} required>
               <option value="">Выберите тип источника</option>
               {editing && !sources.some(source => source.id === sourceId) && <option value={sourceId}>Неизвестный тип</option>}
-              {sources.map(source => <option key={source.id} value={source.id} disabled={!editing && source.id !== S3_SOURCE}>
-                {source.name}{!editing && source.id !== S3_SOURCE ? ' — пока недоступен' : ''}
+              {sources.map(source => <option key={source.id} value={source.id} disabled={!editing && !supportsCollection(source.id)}>
+                {source.id === FILE_STORAGE_SOURCE ? 'Файловая система' : source.name}{!editing && !supportsCollection(source.id) ? ' — пока недоступен' : ''}
               </option>)}
             </select>
           </label>
@@ -383,11 +388,15 @@ function ImplDialog({ sources, existing, onClose, onSaved }: { sources: SourceRe
               <p className="form-help">Даты указываются в местном времени. Заполняйте их, если журнал покрывает весь интервал.</p>
             </details>
           </>}
-          {editing && !isS3 && <p className="form-help">Для этого типа подключения можно изменить название.</p>}
+          {isFileStorage && <label className="impl-field">Каталог
+            <input value={directory} onChange={event => setDirectory(event.target.value)} placeholder="reports/2026" required />
+            <span className="form-help">Путь относительно каталога агента. Точка означает весь каталог.</span>
+          </label>}
+          {editing && !supportsCollection(sourceId) && <p className="form-help">Для этого типа подключения можно изменить название.</p>}
           {error && <div className="auth-feedback error-feedback" role="alert">{error}</div>}
           <div className="dialog-actions">
             <button className="button button-light" type="button" onClick={onClose} disabled={saving}>Отмена</button>
-            <button className="button button-dark" type="submit" disabled={saving || (!editing && !isS3)}>
+            <button className="button button-dark" type="submit" disabled={saving || (!editing && !supportsCollection(sourceId))}>
               {saving ? 'Сохранение…' : editing ? 'Сохранить изменения' : 'Создать подключение'} <ArrowRight size={15} />
             </button>
           </div>
@@ -420,8 +429,8 @@ function SourcesPage({ data, onStarted }: {
   const [details, setDetails] = useState<ImplRecord>()
   const [actionId, setActionId] = useState('')
   const [actionError, setActionError] = useState('')
-  const sources = data.sources.filter(source => source.id === S3_SOURCE)
-  const sourceName = new Map(data.sources.map(source => [source.id, source.name]))
+  const sources = data.sources.filter(source => supportsCollection(source.id))
+  const sourceName = new Map(data.sources.map(source => [source.id, source.id === FILE_STORAGE_SOURCE ? 'Файловая система' : source.name]))
 
   async function perform(item: ImplRecord, action: () => Promise<void>) {
     setActionId(item.id)
@@ -433,7 +442,7 @@ function SourcesPage({ data, onStarted }: {
 
   return <>
     <PageHeading eyebrow="ХРАНИЛИЩА" title={<>Источники <span>данных.</span></>}
-      description="Настройте подключение к S3 и запустите сбор метаданных."
+      description="Подключите бакет S3 или каталог файловой системы и запустите сбор метаданных."
       action={<button className="button button-dark" type="button" onClick={() => setDialogOpen(true)} disabled={!sources.length}>
         <Plus size={16} /> Добавить подключение
       </button>} />
@@ -449,7 +458,7 @@ function SourcesPage({ data, onStarted }: {
             <td><div className="impl-row-actions">
               <IconButton label="Открыть детали" onClick={() => setDetails(item)}><Eye size={15} /></IconButton>
               <IconButton label="Редактировать" onClick={() => { setEditing(item); setDialogOpen(true) }}><Pencil size={15} /></IconButton>
-              {item.sourceId === S3_SOURCE && <IconButton label="Запустить сбор" disabled={Boolean(actionId)} onClick={() => void perform(item, async () => {
+              {supportsCollection(item.sourceId) && <IconButton label="Запустить сбор" disabled={Boolean(actionId)} onClick={() => void perform(item, async () => {
                 const run = await requestJson<RunStatus>('/api/collect/' + item.id + '/run', { method: 'POST' })
                 onStarted(item.id, run.requestId)
               })}><Play size={15} /></IconButton>}
@@ -462,7 +471,7 @@ function SourcesPage({ data, onStarted }: {
             </div></td>
           </tr>)}</tbody>
         </table>
-      </div> : !data.error && <EmptyPanel icon={HardDrive} title="Подключений пока нет" description="Добавьте подключение к бакету S3." />}
+      </div> : !data.error && <EmptyPanel icon={HardDrive} title="Подключений пока нет" description="Добавьте подключение к бакету или каталогу." />}
     </section>
     {dialogOpen && <ImplDialog sources={data.sources} existing={editing}
       onClose={() => { setDialogOpen(false); setEditing(undefined) }} onSaved={() => void data.refresh()} />}
@@ -492,6 +501,7 @@ function ChatsPage({ items }: { items: Connection[] }) {
   const [sending, setSending] = useState(false)
   const [draft, setDraft] = useState<{ prompt: string; reply: string; phase: string } | null>(null)
   const activeStream = useRef<AbortController | null>(null)
+  const [historyOpen, setHistoryOpen] = useState(() => window.matchMedia('(min-width: 761px)').matches)
   const transcript = useRef<HTMLDivElement>(null)
   useEffect(() => () => activeStream.current?.abort(), [])
   useEffect(() => {
@@ -660,17 +670,20 @@ function ChatsPage({ items }: { items: Connection[] }) {
 
   return (
     <>
-      <PageHeading eyebrow="СООБЩЕНИЯ CORE API" title={<>Диалоги <span>и история.</span></>} description="Задавайте вопросы о файлах и прикрепляйте результаты завершённых сборов." action={<button className="button button-dark" type="button" onClick={startNewChat} disabled={sending}><Plus size={16} /> Новый диалог</button>} />
+      <div className="chat-workspace-toolbar">
+        <button className="button button-light" type="button" aria-controls="chat-history" aria-expanded={historyOpen} onClick={() => setHistoryOpen(value => !value)}><MessageSquare size={16} /> История</button>
+        <button className="button button-dark" type="button" onClick={startNewChat} disabled={sending}><Plus size={16} /> Новый диалог</button>
+      </div>
       {error && <ApiNotice kind={errorKind} message={error} onRetry={() => selectedChat ? void loadMessages(selectedChat.id) : void loadChats()} />}
       {notice && <div className="action-feedback success-feedback" role="status"><Check size={15} />{notice}<button type="button" onClick={() => setNotice('')} aria-label="Закрыть"><X size={14} /></button></div>}
-      <section className="chats-layout">
-        <aside className="panel chats-list-panel">
+      <section className={'chats-layout' + (historyOpen ? '' : ' chat-history-hidden')}>
+        <aside className="panel chats-list-panel" id="chat-history" hidden={!historyOpen}>
           <div className="panel-header"><div><h2>Ваши диалоги</h2></div><IconButton label="Обновить диалоги" onClick={() => void loadChats()}><RefreshCw size={15} /></IconButton></div>
-          {chatListLoading && chats.length === 0 ? <div className="loading-row">Загрузка диалогов…</div> : chats.length ? <div className="chat-list">{chats.map((chat) => <div className={`chat-list-item ${selectedChat?.id === chat.id ? 'selected' : ''}`} key={chat.id}><button type="button" className="chat-list-select" disabled={sending} onClick={() => void openChat(chat)}><MessageSquare size={15} /><span><strong>{chat.title || 'Новый диалог'}</strong><small>{formatDate(chat.updatedAt)}</small></span></button><IconButton label="Удалить диалог" disabled={sending} onClick={() => void deleteChat(chat)}><Trash2 size={14} /></IconButton></div>)}</div> : <EmptyPanel icon={MessageSquare} title="Диалогов пока нет" description="Отправьте первое сообщение, чтобы создать диалог в Core." />}
+          {chatListLoading && chats.length === 0 ? <div className="loading-row">Загрузка диалогов…</div> : chats.length ? <div className="chat-list">{chats.map((chat) => <div className={`chat-list-item ${selectedChat?.id === chat.id ? 'selected' : ''}`} key={chat.id}><button type="button" className="chat-list-select" disabled={sending} onClick={() => { if (window.matchMedia('(max-width: 760px)').matches) setHistoryOpen(false); void openChat(chat) }}><MessageSquare size={15} /><span><strong>{chat.title || 'Новый диалог'}</strong><small>{formatDate(chat.updatedAt)}</small></span></button><IconButton label="Удалить диалог" disabled={sending} onClick={() => void deleteChat(chat)}><Trash2 size={14} /></IconButton></div>)}</div> : <EmptyPanel icon={MessageSquare} title="Диалогов пока нет" description="Начните новый диалог, чтобы он появился в истории." />}
           {hasMoreChats && <button className="button button-light load-more-button" type="button" disabled={chatListLoading} onClick={() => void loadChats(chatCursor, true)}>{chatListLoading ? 'Загрузка…' : 'Загрузить ещё диалоги'}</button>}
         </aside>
         <section className="panel chat-thread-panel">
-          <div className="panel-header chat-thread-heading"><div><div className="panel-kicker">{selectedChat ? `ДИАЛОГ ${selectedChat.id.slice(0, 8)}` : 'НОВОЕ ОБРАЩЕНИЕ'}</div><h2>{selectedChat?.title ?? 'Начать диалог'}</h2><p>{selectedChat ? `Создан ${formatDate(selectedChat.createdAt)}` : 'Первое отправленное сообщение создаст новый диалог.'}</p></div>{selectedChat && <span className="chat-id-label">{selectedChat.id}</span>}</div>
+          {selectedChat && <div className="panel-header chat-thread-heading"><h2>{selectedChat.title || 'Диалог'}</h2></div>}
           <div className="chat-message-list" ref={transcript}>
             {messagesLoading && messages.length === 0 ? <div className="loading-row">Загрузка сообщений…</div> : messages.length || draft ? <>
               {hasMoreMessages && <button className="button button-light load-more-button" type="button" disabled={messagesLoading} onClick={() => selectedChat && void loadMessages(selectedChat.id, messageCursor, true)}>{messagesLoading ? 'Загрузка…' : 'Загрузить ещё сообщения'}</button>}
@@ -679,7 +692,7 @@ function ChatsPage({ items }: { items: Connection[] }) {
                 {editingId === message.id ? <div className="message-edit-form"><textarea value={editContent} onChange={(event) => setEditContent(event.target.value)} rows={3} /><div><button className="button button-light" type="button" onClick={() => setEditingId(null)}>Отмена</button><button className="button button-dark" type="button" disabled={editSaving || !editContent.trim() || sending} onClick={() => void saveEdit(message, index)}>{editSaving ? 'Сохранение…' : 'Сохранить'}</button></div><small>По текущей логике Core сообщения после редактируемого будут удалены.</small></div> : <p>{message.content}</p>}
                 {message.role === 'USER' && !sending && editingId !== message.id && <div className="stored-message-actions"><button type="button" onClick={() => beginEdit(message)}><Pencil size={12} /> Изменить</button><button type="button" onClick={() => void deleteMessage(message)}><Trash2 size={12} /> Удалить</button></div>}
               </article>)}
-            </> : <div className="chat-empty-state"><div className="empty-icon"><MessageSquare size={22} /></div><h3>{selectedChat ? 'Сообщений пока нет' : 'История появится здесь'}</h3><p>{selectedChat ? 'Отправьте сообщение, чтобы добавить его в этот диалог.' : 'Core создаёт новый диалог вместе с первым сообщением.'}</p></div>}
+            </> : <div className="chat-empty-state"><div className="empty-icon"><MessageSquare size={22} /></div><h3>{selectedChat ? 'Сообщений пока нет' : 'Чем помочь?'}</h3><p>Задайте вопрос или прикрепите результаты сбора.</p></div>}
             {draft && <>
               <article className="stored-message user-message">
                 <div className="stored-message-top"><span>Вы</span></div><p>{draft.prompt}</p>
@@ -690,15 +703,26 @@ function ChatsPage({ items }: { items: Connection[] }) {
               </article>
             </>}
           </div>
-          <details className="chat-attachment">
+          <form className="chat-composer" onSubmit={submitMessage}>
+            <textarea aria-label="Сообщение" value={composer} onChange={event => setComposer(event.target.value)} rows={2} disabled={sending}
+              placeholder="Напишите сообщение…" onKeyDown={event => {
+                if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                  event.preventDefault()
+                  if (!sending && composer.trim()) event.currentTarget.form?.requestSubmit()
+                }
+              }} />
+            <div className="chat-composer-footer">
+              <details className="chat-attachment">
             <summary>{attachmentRun ? 'Сбор прикреплён' : 'Прикрепить сбор'}</summary>
             <div className="results-toolbar">
               <ConnectionPicker items={items} value={attachmentImpl} onChange={id => { setAttachmentImpl(id); setAttachmentRun('') }} />
               <RunPicker key={attachmentImpl} implId={attachmentImpl} value={attachmentRun} onChange={setAttachmentRun} completedOnly />
             </div>
             {attachmentRun && <button className="text-action" type="button" onClick={() => setAttachmentRun('')}>Убрать вложение</button>}
-          </details>
-          <form className="chat-composer" onSubmit={submitMessage}><textarea value={composer} onChange={(event) => setComposer(event.target.value)} rows={3} disabled={sending} placeholder={selectedChat ? 'Напишите сообщение…' : 'Введите первое сообщение для нового диалога…'} /><div className="chat-composer-footer"><span /><button className="button button-dark" type="submit" disabled={sending || !composer.trim()}>{sending ? 'Генерация…' : 'Отправить'} <Send size={14} /></button></div></form>
+              </details>
+              <button className="button button-dark chat-send" type="submit" aria-label="Отправить сообщение" disabled={sending || !composer.trim()}><Send size={17} /></button>
+            </div>
+          </form>
         </section>
       </section>
     </>
@@ -710,14 +734,13 @@ function HomePage() {
   const [mobileOpen, setMobileOpen] = useState(false)
   const [implId, setImplId] = useState('')
   const [runId, setRunId] = useState('')
-  const [graphTarget, setGraphTarget] = useState<GraphLocation | null>(null)
+  const [graphTarget, setGraphTarget] = useState('')
   const data = useSourceData()
   const activeLabel = navigation.find(item => item.id === active)?.label
 
-  function selectImpl(id: string) { setImplId(id); setRunId(''); setGraphTarget(null) }
-  function openGraph(target: GraphLocation) {
-    if (target.implId !== implId) selectImpl(target.implId)
-    setGraphTarget(target)
+  function selectImpl(id: string) { setImplId(id); setRunId(''); setGraphTarget('') }
+  function openGraph(path: string) {
+    setGraphTarget(path)
     setActive('dependencies')
   }
   function openRun(id: string, requestId: string) {
@@ -740,10 +763,11 @@ function HomePage() {
         {active === 'overview' && <Overview data={data} onNavigate={setActive} />}
         {active === 'sources' && <SourcesPage data={data} onStarted={openRun} />}
         {active === 'chats' && <ChatsPage items={data.implementations} />}
+        {active === 'templates' && <TemplatesPage />}
         {(active === 'pii' || active === 'recommendations') && <ResultsPage mode={active} items={data.implementations}
-          implId={implId} runId={runId} onImpl={selectImpl} onRun={setRunId} onGraph={openGraph} />}
-        {active === 'dependencies' && <GraphPage items={data.implementations} implId={implId} target={graphTarget} onImpl={selectImpl} />}
-        {active === 'archive' && <ArchivePage items={data.implementations} implId={implId} onImpl={selectImpl} />}
+          implId={implId} runId={runId} onImpl={selectImpl} onRun={setRunId} onGraph={openGraph} onTemplates={() => setActive('templates')} />}
+        {active === 'dependencies' && <GraphPage items={data.implementations} implId={implId} runId={runId} target={graphTarget} onImpl={selectImpl} onRun={id => { setRunId(id); setGraphTarget('') }} />}
+        {active === 'archive' && <ArchivePage items={data.implementations} implId={implId} onImpl={selectImpl} onGraph={() => { setGraphTarget(''); setActive('dependencies') }} />}
         <footer className="workspace-footer"><span>© DACS</span></footer>
       </div></div>
     </main>

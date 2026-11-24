@@ -1,9 +1,14 @@
-import { useCallback, useEffect, useState } from 'react'
-import type { ReactNode } from 'react'
-import { Archive, ArrowLeft, ArrowRight, File, Folder, RefreshCw } from 'lucide-react'
-import { ApiError, KEYCLOAK_LOGIN_URL, requestJson } from './api'
+import { useCallback, useEffect, useId, useState } from 'react'
+import type { FormEvent, ReactNode } from 'react'
+import { Archive, ArrowLeft, ArrowRight, File, RefreshCw } from 'lucide-react'
+import { ApiError, KEYCLOAK_LOGIN_URL, requestJson, requestVoid } from './api'
 
 export const S3_SOURCE = 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a14'
+export const FILE_STORAGE_SOURCE = 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a15'
+
+export function supportsCollection(sourceId: string) {
+  return sourceId === S3_SOURCE || sourceId === FILE_STORAGE_SOURCE
+}
 const PAGE_SIZE = 25
 
 export type Connection = { id: string; name: string; sourceId: string }
@@ -11,35 +16,18 @@ export type RunStatus = { requestId: string; status: 'QUEUED' | 'RUNNING' | 'COM
 type RunEntry = RunStatus & { createdAt: string }
 type Page<T> = { items: T[]; nextOffset: number | null }
 type Location = { bucket: string; key: string }
-export type GraphLocation = Location & { implId: string; prefix: string }
-type PiiFile = {
-  name: string | null; path: string | null; status: string; categories: string[]; detectors: string[];
-  scanComplete: boolean | null; scannerVersion: string | null; retentionStatus: string; graph: GraphLocation | null
-}
-type PiiSummary = { total: number; partiallyScanned: number; notChecked: number; byStatus: Record<string, number> }
+type DocumentTemplate = { id: string; name: string; pathContains: string; nameContains: string; contentContains: string; retentionDays: number | null; retentionYears: number | null }
+type RelatedDocument = { path: string; kind: 'IDENTICAL_CONTENT' | 'SHARED_FRAGMENTS' | 'SHARED_IDENTIFIERS'; sharedFragments: number }
+type DocumentItem = { path: string; templates: { id: string; name: string; retainUntil: string | null; active: boolean }[]; needsScan: boolean; deleteBlocked: boolean; references: string[]; referencedBy: string[]; related: RelatedDocument[] }
+type DocumentPage = Page<DocumentItem> & { complete: boolean }
 type Assessment = {
   path: string; u: number | null; b: number; s: number | null; status: string; usageReason: string;
   signals: { rule: string; weight: number }[]; preferredPath: string | null; recommendation: string; responseState: string
-}
-type Bucket = { name: string; rootPrefix: string }
-type BucketPage = { buckets: Bucket[]; nextToken: string | null }
-type GraphChildren = {
-  folders: { name: string; prefix: string }[];
-  files: { name: string; key: string; sizeBytes: number | null; modifiedAt: string | null }[];
-  nextToken: string | null
 }
 type ArchiveEntry = { id: string; state: string; createdAt: string; details: { source: Location; destination: Location; sizeBytes: number } }
 type ArchivePreview = { source: Location; destination: Location; sizeBytes: number }
 
 const runLabels = { QUEUED: 'В очереди', RUNNING: 'Выполняется', COMPLETED: 'Завершён', FAILED: 'Ошибка' }
-const piiLabels: Record<string, string> = {
-  DETECTED: 'Обнаружены признаки', REVIEW_REQUIRED: 'Требуется проверка',
-  NOT_DETECTED: 'Признаки не обнаружены', PARTIAL: 'Частичная проверка',
-  UNSUPPORTED: 'Формат не поддерживается', ERROR: 'Ошибка проверки', NOT_SCANNED: 'Проверка не выполнялась',
-}
-const categories: Record<string, string> = {
-  EMAIL: 'Электронная почта', PHONE_RU: 'Телефон РФ', SNILS: 'СНИЛС', INN_12: 'ИНН физлица', PASSPORT_RU: 'Паспорт РФ',
-}
 const states: Record<string, string> = { KEEP: 'Сохранить', WARNING: 'Проверить', ARCHIVE_CONFIRMATION_REQUIRED: 'Предложено архивирование' }
 const reasons: Record<string, string> = {
   RECENT_READ: 'Есть недавние обращения', AUDIT_COVERAGE_UNVERIFIED: 'Покрытие журнала не подтверждено',
@@ -112,16 +100,16 @@ function Paging({ index, busy, hasNext, onBack, onNext }: {
 }
 
 export function ConnectionPicker({ items, value, onChange }: { items: Connection[]; value: string; onChange: (id: string) => void }) {
-  return <label className="results-field">Источник S3
+  return <label className="results-field">Источник данных
     <select value={value} onChange={event => onChange(event.target.value)}>
       <option value="">Выберите подключение</option>
-      {items.filter(item => item.sourceId === S3_SOURCE).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+      {items.filter(item => supportsCollection(item.sourceId)).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
     </select>
   </label>
 }
 
-export function RunPicker({ implId, value, onChange, completedOnly = false }: {
-  implId: string; value: string; onChange: (id: string) => void; completedOnly?: boolean
+export function RunPicker({ implId, value, onChange, completedOnly = false, latestByDefault = false }: {
+  implId: string; value: string; onChange: (id: string) => void; completedOnly?: boolean; latestByDefault?: boolean
 }) {
   const [offset, setOffset] = useState(0)
   const history = useQuery<Page<RunEntry>>(implId ? url('/api/collect/' + encodeURIComponent(implId) + '/runs', { offset, limit: PAGE_SIZE }) : '')
@@ -129,7 +117,7 @@ export function RunPicker({ implId, value, onChange, completedOnly = false }: {
   return <div className="results-run-picker">
     <label className="results-field">Сбор
       <select value={value} disabled={!implId} onChange={event => onChange(event.target.value)}>
-        <option value="">Выберите запуск</option>
+        <option value="">{latestByDefault ? 'Последний завершённый сбор' : 'Выберите запуск'}</option>
         {value && !entries.some(run => run.requestId === value) && <option value={value}>{value.slice(0, 8)}</option>}
         {entries.map(run => <option key={run.requestId} value={run.requestId}>{date(run.createdAt)} · {runLabels[run.status]} · {run.processed} файлов</option>)}
       </select>
@@ -141,9 +129,9 @@ export function RunPicker({ implId, value, onChange, completedOnly = false }: {
   </div>
 }
 
-export function ResultsPage({ mode, items, implId, runId, onImpl, onRun, onGraph }: {
+export function ResultsPage({ mode, items, implId, runId, onImpl, onRun, onGraph, onTemplates }: {
   mode: 'pii' | 'recommendations'; items: Connection[]; implId: string; runId: string;
-  onImpl: (id: string) => void; onRun: (id: string) => void; onGraph: (target: GraphLocation) => void
+  onImpl: (id: string) => void; onRun: (id: string) => void; onGraph: (path: string) => void; onTemplates: () => void
 }) {
   const run = useQuery<RunStatus>(runId ? collected(runId) : '')
   const pending = run.data?.status === 'QUEUED' || run.data?.status === 'RUNNING'
@@ -155,6 +143,7 @@ export function ResultsPage({ mode, items, implId, runId, onImpl, onRun, onGraph
 
   return <>
     {mode === 'pii' ? <Heading title="Персональные" tail="данные." /> : <Heading title="Оценка" tail="файлов." />}
+    {mode === 'pii' && <button className="button button-light" type="button" onClick={onTemplates}>Управлять шаблонами <ArrowRight size={14} /></button>}
     <section className="panel results-panel">
       <div className="results-toolbar">
         <ConnectionPicker items={items} value={implId} onChange={onImpl} />
@@ -165,57 +154,183 @@ export function ResultsPage({ mode, items, implId, runId, onImpl, onRun, onGraph
       {!runId && <p className="empty-note">Выберите подключение и запуск, чтобы открыть отчёт.</p>}
     </section>
     {run.data?.status === 'COMPLETED' && (mode === 'pii'
-      ? <PiiResults key={runId} runId={runId} onGraph={onGraph} />
+      ? <DocumentBrowser key={runId} implId={implId} runId={runId} onGraph={onGraph} />
       : <Assessments key={runId} runId={runId} implId={implId} />)}
   </>
 }
 
-function PiiResults({ runId, onGraph }: { runId: string; onGraph: (target: GraphLocation) => void }) {
-  const [status, setStatus] = useState('FINDINGS')
-  const [category, setCategory] = useState('')
-  const [offset, setOffset] = useState(0)
-  const summary = useQuery<PiiSummary>(collected(runId) + '/pii/summary')
-  const files = useQuery<Page<PiiFile>>(url(collected(runId) + '/pii/files', { status, category: category || null, offset, limit: PAGE_SIZE }))
-  const counts = summary.data
-  return <>
-    <Status {...summary} />
-    {counts && <section className="metrics-grid results-metrics" aria-label="Сводка проверки">
-      {Object.entries({
-        'Всего файлов': counts.total,
-        'Обнаружены признаки': counts.byStatus.DETECTED ?? 0,
-        'Требуют проверки': counts.byStatus.REVIEW_REQUIRED ?? 0,
-        'Частично проверены': counts.partiallyScanned,
-        'Не удалось проверить': counts.notChecked,
-      }).map(([label, value]) => <article className="panel result-stat" key={label}><span>{label}</span><strong>{value}</strong></article>)}
-    </section>}
-    <section className="panel results-panel">
-      <h2>Результаты проверки</h2>
-      <div className="results-toolbar">
-        <label className="results-field">Статус<select value={status} onChange={event => { setStatus(event.target.value); setOffset(0) }}>
-          <option value="FINDINGS">Обнаружения и ручная проверка</option><option value="ALL">Все файлы</option>
-          {Object.entries(piiLabels).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
-        </select></label>
-        <label className="results-field">Категория<select value={category} onChange={event => { setCategory(event.target.value); setOffset(0) }}>
-          <option value="">Все категории</option>{Object.entries(categories).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
-        </select></label>
+const templatesPath = '/api/documents/templates'
+const emptyTemplate = { id: '', name: '', pathContains: '', nameContains: '', contentContains: '', retentionDays: 365, retentionYears: null }
+
+export function TemplatesPage() {
+  return <><Heading title="Шаблоны" tail="документов." /><TemplateEditor /></>
+}
+
+function TemplateEditor() {
+  const templates = useQuery<DocumentTemplate[]>(templatesPath)
+  const [draft, setDraft] = useState<DocumentTemplate | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<unknown>()
+  const inYears = draft?.retentionYears != null
+
+  async function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!draft || busy) return
+    setBusy(true); setError(undefined)
+    try {
+      await requestJson(draft.id ? templatesPath + '/' + draft.id : templatesPath,
+        { method: draft.id ? 'PUT' : 'POST', body: JSON.stringify(draft) })
+      setDraft(null); templates.refresh()
+    } catch (failure) { setError(failure) }
+    finally { setBusy(false) }
+  }
+
+  async function remove(template: DocumentTemplate) {
+    if (!window.confirm(`Удалить шаблон «${template.name}»? Его срок хранения перестанет применяться.`)) return
+    setBusy(true); setError(undefined)
+    try {
+      await requestVoid(templatesPath + '/' + template.id, { method: 'DELETE' })
+      if (draft?.id === template.id) setDraft(null)
+      templates.refresh()
+    } catch (failure) { setError(failure) }
+    finally { setBusy(false) }
+  }
+
+  return <section className="panel results-panel">
+    <div className="panel-header"><h2>Шаблоны документов</h2>
+      <button className="button button-light" type="button" disabled={busy} onClick={() => { setError(undefined); setDraft(emptyTemplate) }}>Добавить шаблон</button>
+    </div>
+    <Status {...templates} empty={templates.data?.length === 0 ? 'Создайте шаблон, чтобы применять срок хранения к подходящим документам.' : undefined} />
+    <div className="result-list">{templates.data?.map(template => <div className="document-template-row" key={template.id}>
+      <span><strong>{template.name}</strong><small>{template.retentionYears != null ? template.retentionYears + ' г.' : template.retentionDays + ' дн.'} с последнего изменения</small></span>
+      <button className="button button-light" type="button" disabled={busy} onClick={() => { setError(undefined); setDraft(template) }}>Изменить</button>
+      <button className="button button-light" type="button" disabled={busy} onClick={() => void remove(template)}>Удалить</button>
+    </div>)}</div>
+    {draft && <form className="document-template-form" onSubmit={save}>
+      <div className="impl-field-grid">
+        <label className="results-field">Название<input required maxLength={120} value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })} /></label>
+        <div className="template-duration">
+          <label className="results-field">Срок хранения<input required type="number" min={1} max={inYears ? 100 : 36500}
+            value={(inYears ? draft.retentionYears : draft.retentionDays) || ''}
+            onChange={event => setDraft({ ...draft, [inYears ? 'retentionYears' : 'retentionDays']: Number(event.target.value) })} /></label>
+          <label className="results-field">Единица<select value={inYears ? 'years' : 'days'} onChange={event => {
+            const useYears = event.target.value === 'years'
+            setDraft({ ...draft, retentionDays: useYears ? null : 0, retentionYears: useYears ? 0 : null })
+          }}><option value="days">Дни</option><option value="years">Годы</option></select></label>
+        </div>
+        {([['pathContains', 'Фрагмент пути'], ['nameContains', 'Фрагмент имени'], ['contentContains', 'Фрагмент содержимого']] as const).map(([key, title]) =>
+          <label className="results-field" key={key}>{title}<input maxLength={512} value={draft[key]} onChange={event => setDraft({ ...draft, [key]: event.target.value })} /></label>)}
       </div>
-      <Status {...files} empty={files.data?.items.length === 0 ? 'По выбранным фильтрам файлов нет.' : undefined} />
-      <div className="result-list">{files.data?.items.map((file, index) => <details className="result-row" key={file.path ?? index}>
-        <summary><span><strong>{file.name ?? 'Файл без имени'}</strong><small>{file.path}</small></span>
-          <span className={'result-badge ' + (file.status === 'DETECTED' || file.status === 'REVIEW_REQUIRED' ? 'attention' : '')}>{piiLabels[file.status] ?? file.status}</span>
-        </summary>
-        <dl className="result-details">
-          <div><dt>Категории</dt><dd>{file.categories.map(value => categories[value] ?? value).join(', ') || '—'}</dd></div>
-          <div><dt>Полнота проверки</dt><dd>{file.scanComplete === null ? 'Неизвестна' : file.scanComplete ? 'Полная' : 'Неполная'}</dd></div>
-          <div><dt>Версия детектора</dt><dd>{file.scannerVersion ?? '—'}</dd></div>
-          <div><dt>Методы</dt><dd>{file.detectors.join(', ') || '—'}</dd></div>
-          <div><dt>Срок хранения</dt><dd>{file.retentionStatus === 'NEEDS_DETERMINATION' ? 'Требуется определить' : '—'}</dd></div>
-        </dl>
-        {file.graph && <button type="button" className="button button-light" onClick={() => file.graph && onGraph(file.graph)}>Открыть в графе <ArrowRight size={14} /></button>}
-      </details>)}</div>
-      <Paging index={offset / PAGE_SIZE} busy={files.loading} hasNext={files.data?.nextOffset != null}
-        onBack={() => setOffset(offset - PAGE_SIZE)} onNext={() => setOffset(files.data?.nextOffset ?? offset)} />
+      <p className="page-lead">Заполните хотя бы одно условие. Все заполненные условия должны совпасть. После изменения условия по содержимому запустите сбор заново.</p>
+      <div className="results-toolbar">
+        <button className="button button-dark" disabled={busy || ![draft.pathContains, draft.nameContains, draft.contentContains].some(value => value.trim())}>Сохранить шаблон</button>
+        <button className="button button-light" type="button" disabled={busy} onClick={() => { setError(undefined); setDraft(null) }}>Отмена</button>
+      </div>
+    </form>}
+    <Status loading={false} error={error} />
+  </section>
+}
+
+function DocumentBrowser({ implId, runId, graph = false, target, onGraph }: {
+  implId: string; runId: string; graph?: boolean; target?: string; onGraph?: (path: string) => void
+}) {
+  const [search, setSearch] = useState(target ?? '')
+  const [mode, setMode] = useState(graph ? 'graph' : 'matched')
+  const [offset, setOffset] = useState(0)
+  const [selected, setSelected] = useState(target ?? '')
+  const data = useQuery<DocumentPage>(url('/api/documents/' + encodeURIComponent(implId), { run: runId || null, search, mode, offset, limit: PAGE_SIZE }))
+  const focus = data.data?.items.find(item => item.path === selected) ?? data.data?.items[0]
+  function open(path: string) { setMode('graph'); setSearch(path); setSelected(path); setOffset(0) }
+  return <section className="panel results-panel">
+    <h2>{graph ? 'Связи документов' : 'Сопоставление с шаблонами'}</h2>
+    <div className="results-toolbar">
+      <label className="results-field">Поиск по пути<input type="search" value={search} onChange={event => { setSearch(event.target.value); setOffset(0) }} /></label>
+      <label className="results-field">Показать<select value={mode} onChange={event => { setMode(event.target.value); setOffset(0) }}>
+        <option value={graph ? 'linked' : 'matched'}>{graph ? 'Документы с прямыми ссылками' : 'Совпадения и ожидающие сбора'}</option>
+        <option value={graph ? 'graph' : 'all'}>Все документы</option>
+      </select></label>
+    </div>
+    <Status {...data} empty={data.data?.items.length === 0 ? 'Документы по выбранным условиям не найдены.' : undefined} />
+    {graph && data.data && !data.data.complete && <p className="empty-note">Сведения о ссылках неполные. Удаление по этому сбору недоступно.</p>}
+    {graph && focus && <>
+      <label className="results-field">Документ<select value={focus.path} onChange={event => setSelected(event.target.value)}>
+        {data.data?.items.map(item => <option key={item.path}>{item.path}</option>)}
+      </select></label>
+      <ReferenceGraph key={focus.path} focus={focus} onOpen={open} />
+      {!focus.needsScan && !focus.templates.some(template => template.active) &&
+        <ArchiveButton key={focus.path} implId={implId} path={focus.path} />}
+    </>}
+    {!graph && <div className="result-list">{data.data?.items.map(item => <details className="result-row" key={item.path}>
+      <summary><span><strong>{item.path.slice(item.path.lastIndexOf('/') + 1)}</strong><small>{item.path}</small></span>
+        <span className={'result-badge' + (item.deleteBlocked ? ' attention' : '')}>{item.needsScan ? 'Требуется новый сбор' : item.deleteBlocked ? 'Удаление заблокировано' : item.templates.length ? 'Срок хранения истёк' : 'Без шаблона'}</span>
+      </summary>
+      {item.templates.map(template => <p key={template.id}>{template.name} · {template.retainUntil ? `хранить до ${date(template.retainUntil)}` : 'дата изменения неизвестна'}</p>)}
+      {onGraph && <button className="button button-light" type="button" onClick={() => onGraph(item.path)}>Открыть связи <ArrowRight size={14} /></button>}
+    </details>)}</div>}
+    <Paging index={offset / PAGE_SIZE} busy={data.loading} hasNext={data.data?.nextOffset != null}
+      onBack={() => setOffset(offset - PAGE_SIZE)} onNext={() => setOffset(data.data?.nextOffset ?? offset)} />
+  </section>
+}
+
+function ReferenceGraph({ focus, onOpen }: { focus: DocumentItem; onOpen: (path: string) => void }) {
+  const marker = useId()
+  const [offset, setOffset] = useState(0)
+  const limit = 8
+  const incoming = focus.referencedBy.slice(offset, offset + limit)
+  const outgoing = focus.references.slice(offset, offset + limit)
+  const count = Math.max(focus.referencedBy.length, focus.references.length)
+  const related = focus.related ?? []
+  const y = (index: number, total: number) => 100 * (index + .5) / total
+  const filename = (path: string) => path.slice(path.lastIndexOf('/') + 1)
+  const neighbors = (paths: string[], side: 'incoming' | 'outgoing') => paths.map((path, index) =>
+    <button key={path} type="button" title={path} style={{ top: y(index, paths.length) + '%' }}
+      className={'document-node document-node-' + side} onClick={() => onOpen(path)}>
+      <File size={15} /><span>{filename(path)}</span>
+    </button>)
+  return <figure className="reference-graph">
+    <figcaption><span>Входящие ссылки · {focus.referencedBy.length}</span><span>Выбранный документ</span><span>Исходящие ссылки · {focus.references.length}</span></figcaption>
+    <div className="reference-graph-canvas" style={{ height: Math.max(190, 60 * Math.max(incoming.length, outgoing.length)) }}>
+      <svg className="reference-graph-edges" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+        <defs><marker id={marker} markerWidth="3" markerHeight="3" refX="2" refY="1.5" orient="auto">
+          <path d="M 0 0 L 2 1.5 L 0 3" fill="none" stroke="currentColor" />
+        </marker></defs>
+        {incoming.map((path, index) => <path key={path}
+          d={`M 28 ${y(index, incoming.length)} C 33 ${y(index, incoming.length)}, 33 50, 37 50`} markerEnd={`url(#${marker})`} />)}
+        {outgoing.map((path, index) => <path key={path}
+          d={`M 63 50 C 67 50, 67 ${y(index, outgoing.length)}, 72 ${y(index, outgoing.length)}`} markerEnd={`url(#${marker})`} />)}
+      </svg>
+      {neighbors(incoming, 'incoming')}
+      <div className="document-node document-node-focus" title={focus.path}>
+        <File size={18} /><strong>{filename(focus.path)}</strong>
+        {focus.deleteBlocked && <span className="result-badge attention">Защищён</span>}
+      </div>
+      {neighbors(outgoing, 'outgoing')}
+    </div>
+    <p className="reference-graph-path">{focus.path}</p>
+    {!count && <p className="empty-note">В выбранном сборе прямых ссылок для этого документа не найдено.</p>}
+    {count > limit && <Paging busy={false} index={offset / limit} hasNext={offset + limit < count}
+      onBack={() => setOffset(offset - limit)} onNext={() => setOffset(offset + limit)} />}
+    <section className="related-documents">
+      <h3>Косвенные связи</h3>
+      {related.length === 0 && <small>Совпадений по содержимому не найдено.</small>}
+      {related.map(link => <button type="button" className="related-document" key={link.path} onClick={() => onOpen(link.path)}>
+        <File size={15} /><span><strong>{filename(link.path)}</strong><small>{link.path}</small></span>
+        <span className="result-badge">{link.kind === 'IDENTICAL_CONTENT' ? 'Точная копия'
+          : (link.kind === 'SHARED_IDENTIFIERS' ? 'Общих идентификаторов' : 'Общих фрагментов') + ' · ' + link.sharedFragments}</span>
+      </button>)}
     </section>
+  </figure>
+}
+
+export function GraphPage({ items, implId, runId, target, onImpl, onRun }: {
+  items: Connection[]; implId: string; runId: string; target: string; onImpl: (id: string) => void; onRun: (id: string) => void
+}) {
+  return <><Heading title="Граф" tail="зависимостей." />
+    <section className="panel results-panel"><div className="results-toolbar">
+      <ConnectionPicker items={items} value={implId} onChange={onImpl} />
+      <RunPicker key={implId} implId={implId} value={runId} onChange={onRun} completedOnly latestByDefault />
+    </div></section>
+    {implId && <DocumentBrowser key={JSON.stringify([implId, runId, target])} implId={implId} runId={runId} graph target={target} />}
   </>
 }
 
@@ -230,7 +345,7 @@ function Assessments({ implId, runId }: { implId: string; runId: string }) {
   const rows = scores.data?.slice(0, PAGE_SIZE) ?? []
   return <section className="panel results-panel">
     <h2>Рекомендации по файлам</h2>
-    <Status {...scores} empty={scores.data?.length === 0 ? 'В завершённом сборе нет файлов.' : undefined} />
+    <Status {...scores} empty={scores.data?.length === 0 ? 'В этом сборе нет файлов с достаточными данными для рекомендаций.' : undefined} />
     <div className="result-list">{rows.map(score => {
       const source = parseLocation(score.path)
       const label = states[score.responseState] ?? score.responseState
@@ -246,7 +361,7 @@ function Assessments({ implId, runId }: { implId: string; runId: string }) {
           {score.preferredPath && <div><dt>Предпочтительный экземпляр</dt><dd>{score.preferredPath}</dd></div>}
         </dl>
         {!!score.signals.length && <ul className="result-signals">{score.signals.map(signal => <li key={signal.rule}>{reasons[signal.rule] ?? signal.rule}: +{number(signal.weight)}</li>)}</ul>}
-        {implId && source && score.responseState === 'ARCHIVE_CONFIRMATION_REQUIRED' && <ArchiveButton implId={implId} source={source} />}
+        {implId && score.responseState === 'ARCHIVE_CONFIRMATION_REQUIRED' && <ArchiveButton implId={implId} path={score.path} />}
       </details>
     })}</div>
     <Paging index={offset / PAGE_SIZE} busy={scores.loading} hasNext={(scores.data?.length ?? 0) > PAGE_SIZE}
@@ -254,7 +369,9 @@ function Assessments({ implId, runId }: { implId: string; runId: string }) {
   </section>
 }
 
-function ArchiveButton({ implId, source }: { implId: string; source: Location }) {
+const filesystemArchivePath = (implId: string) => '/api/documents/' + encodeURIComponent(implId) + '/archive'
+
+function ArchiveButton({ implId, path }: { implId: string; path: string }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<unknown>()
   const [done, setDone] = useState(false)
@@ -262,6 +379,15 @@ function ArchiveButton({ implId, source }: { implId: string; source: Location })
     setBusy(true)
     setError(undefined)
     try {
+      if (path.startsWith('file:///')) {
+        if (window.confirm('Создать архивную копию?\\n' + path)) {
+          await requestJson(filesystemArchivePath(implId), { method: 'POST', body: JSON.stringify({ path }) })
+          setDone(true)
+        }
+        return
+      }
+      const source = parseLocation(path)
+      if (!source) throw new Error('Неизвестный формат пути документа.')
       const base = implPath(implId) + '/archive'
       const preview = await requestJson<ArchivePreview>(base + '/preview', { method: 'POST', body: JSON.stringify(source) })
       if (window.confirm('Создать архивную копию?\n' + location(preview.source) + '\n→ ' + location(preview.destination))) {
@@ -276,69 +402,33 @@ function ArchiveButton({ implId, source }: { implId: string; source: Location })
   </button><Status loading={false} error={error} /></div>
 }
 
-function TokenPaging({ tokens, nextToken, busy, setTokens }: {
-  tokens: (string | null)[]; nextToken?: string | null; busy: boolean; setTokens: (tokens: (string | null)[]) => void
-}) {
-  return <Paging index={tokens.length - 1} busy={busy} hasNext={Boolean(nextToken)}
-    onBack={() => setTokens(tokens.slice(0, -1))} onNext={() => nextToken && setTokens([...tokens, nextToken])} />
-}
-
-export function GraphPage({ items, implId, target, onImpl }: {
-  items: Connection[]; implId: string; target: GraphLocation | null; onImpl: (id: string) => void
-}) {
-  return <><Heading title="Граф" tail="зависимостей." />
-    <section className="panel results-panel"><ConnectionPicker items={items} value={implId} onChange={onImpl} /></section>
-    {implId && <BucketTree key={JSON.stringify([implId, target])} implId={implId} target={target} />}
-  </>
-}
-
-function BucketTree({ implId, target }: { implId: string; target: GraphLocation | null }) {
-  const [bucket, setBucket] = useState(target?.bucket ?? '')
-  const [prefix, setPrefix] = useState(target?.prefix ?? '')
-  const [bucketTokens, setBucketTokens] = useState<(string | null)[]>([null])
-  const [tokens, setTokens] = useState<(string | null)[]>([null])
-  const root = implPath(implId) + '/buckets'
-  const buckets = useQuery<BucketPage>(bucket ? '' : url(root, { continuationToken: bucketTokens[bucketTokens.length - 1], limit: PAGE_SIZE }))
-  const children = useQuery<GraphChildren>(bucket ? url(root + '/' + encodeURIComponent(bucket) + '/children', {
-    prefix, continuationToken: tokens[tokens.length - 1], limit: PAGE_SIZE,
-  }) : '')
-  function openPrefix(next: string) { setPrefix(next); setTokens([null]) }
-  const branch = Array.from(prefix.matchAll(/[^/]*\//g)).map(match => ({ name: match[0], prefix: prefix.slice(0, match.index! + match[0].length) }))
-  return <section className="panel results-panel">
-    <div className="graph-crumbs" aria-label="Путь в бакете">
-      <button className="text-action" type="button" onClick={() => { setBucket(''); openPrefix('') }}>Бакеты</button>
-      {bucket && <button className="text-action" type="button" onClick={() => openPrefix('')}>{bucket}</button>}
-      {branch.map(node => <button className="text-action" key={node.prefix} type="button" onClick={() => openPrefix(node.prefix)}>{node.name}</button>)}
-    </div>
-    {target?.bucket === bucket && target.prefix === prefix && <p className="page-lead">Файл из отчёта: {target.key}</p>}
-    {!bucket ? <>
-      <Status {...buckets} empty={buckets.data?.buckets.length === 0 ? 'В последнем завершённом сборе нет бакетов с файлами.' : undefined} />
-      <div className="result-list">{buckets.data?.buckets.map(item => <button type="button" className="tree-row" key={item.name}
-        onClick={() => { setBucket(item.name); openPrefix(item.rootPrefix) }}><Folder size={16} />{item.name}<ArrowRight size={14} /></button>)}</div>
-      <TokenPaging tokens={bucketTokens} nextToken={buckets.data?.nextToken} busy={buckets.loading} setTokens={setBucketTokens} />
-    </> : <>
-      <Status {...children} empty={children.data && !children.data.folders.length && !children.data.files.length ? 'На этом уровне нет файлов или папок.' : undefined} />
-      <div className="result-list">
-        {children.data?.folders.map(folder => <button type="button" className="tree-row" key={folder.prefix} onClick={() => openPrefix(folder.prefix)}>
-          <Folder size={16} />{folder.name}<ArrowRight size={14} />
-        </button>)}
-        {children.data?.files.map(file => <details className="result-row" key={file.key}>
-          <summary className={'tree-row tree-file' + (file.key === target?.key ? ' selected' : '')}>
-            <File size={16} /><span>{file.name}<small>{file.modifiedAt ? date(file.modifiedAt) : '—'} · {size(file.sizeBytes)}</small></span>
-          </summary>
-          <ArchiveButton implId={implId} source={{ bucket, key: file.key }} />
-        </details>)}
-      </div>
-      <TokenPaging tokens={tokens} nextToken={children.data?.nextToken} busy={children.loading} setTokens={setTokens} />
-    </>}
-  </section>
-}
-
-export function ArchivePage({ items, implId, onImpl }: { items: Connection[]; implId: string; onImpl: (id: string) => void }) {
+export function ArchivePage({ items, implId, onImpl, onGraph }: { items: Connection[]; implId: string; onImpl: (id: string) => void; onGraph: () => void }) {
+  const source = items.find(item => item.id === implId)?.sourceId
   return <><Heading title="Архив" tail="файлов." />
     <section className="panel results-panel"><ConnectionPicker items={items} value={implId} onChange={onImpl} /></section>
-    {implId && <ArchiveEntries key={implId} implId={implId} />}
+    {source === S3_SOURCE && <ArchiveEntries key={implId} implId={implId} />}
+    {source === FILE_STORAGE_SOURCE && <FilesystemArchiveEntries key={implId} implId={implId} onGraph={onGraph} />}
   </>
+}
+
+type FilesystemCopy = { id: string; path: string; sizeBytes: number; createdAt: string }
+
+function FilesystemArchiveEntries({ implId, onGraph }: { implId: string; onGraph: () => void }) {
+  const [offset, setOffset] = useState(0)
+  const base = filesystemArchivePath(implId)
+  const entries = useQuery<Page<FilesystemCopy>>(url(base, { offset, limit: PAGE_SIZE }))
+  return <section className="panel results-panel">
+    <div className="panel-header"><h2>Архивные копии</h2>
+      <button className="button button-light" type="button" onClick={onGraph}>Выбрать документ <ArrowRight size={14} /></button>
+    </div>
+    <Status {...entries} empty={entries.data?.items.length === 0 ? 'Архивных копий пока нет.' : undefined} />
+    <div className="result-list">{entries.data?.items.map(item => <div className="document-template-row" key={item.id}>
+      <span><strong>{item.path.slice(item.path.lastIndexOf('/') + 1)}</strong><small>{item.path} · {date(item.createdAt)} · {size(item.sizeBytes)}</small></span>
+      <a className="button button-light" href={base + '/' + encodeURIComponent(item.id) + '/download'}>Скачать</a>
+    </div>)}</div>
+    <Paging index={offset / PAGE_SIZE} busy={entries.loading} hasNext={entries.data?.nextOffset != null}
+      onBack={() => setOffset(offset - PAGE_SIZE)} onNext={() => setOffset(entries.data?.nextOffset ?? offset)} />
+  </section>
 }
 
 function ArchiveEntries({ implId }: { implId: string }) {
@@ -349,12 +439,19 @@ function ArchiveEntries({ implId }: { implId: string }) {
   const [notice, setNotice] = useState('')
   const base = implPath(implId) + '/archive'
   const entries = useQuery<Page<ArchiveEntry>>(url(base, { state, offset, limit: PAGE_SIZE }))
-  async function change(item: ArchiveEntry, action: 'restore' | 'undo-restore' | 'delete') {
-    if (action === 'delete' && !window.confirm('Удалить исходный файл и архивную копию?\n' + location(item.details.source))) return
+  async function change(item: ArchiveEntry, action: 'restore' | 'undo-restore' | 'delete', cascade = false) {
     setBusy(item.id); setError(undefined); setNotice('')
     try {
-      await requestJson(base + '/' + encodeURIComponent(item.id) + (action === 'delete' ? '' : '/' + action),
-        { method: action === 'delete' ? 'DELETE' : 'POST' })
+      const entry = base + '/' + encodeURIComponent(item.id)
+      if (action === 'delete') {
+        const plan = await requestJson<{ ids: string[]; paths: string[] }>(url(entry + '/delete-plan', { cascade: String(cascade) }))
+        const question = cascade ? 'Удалить перечисленные файлы и их архивные копии?' : 'Удалить только этот документ и его архивную копию?'
+        if (!window.confirm(question + '\n' + plan.paths.join('\n'))) return
+        await requestJson(url(entry, { cascade: String(cascade) }),
+          { method: 'DELETE', body: JSON.stringify({ ids: plan.ids }) })
+      } else {
+        await requestJson(entry + '/' + action, { method: 'POST' })
+      }
       setNotice(action === 'delete' ? 'Файл и архивная копия удалены.' : action === 'restore' ? 'Файл восстановлен.' : 'Восстановление отменено.')
       if (entries.data?.items.length === 1 && offset > 0) setOffset(offset - PAGE_SIZE)
       else entries.refresh()
@@ -376,7 +473,10 @@ function ArchiveEntries({ implId }: { implId: string }) {
       <div className="result-actions">
         {item.state === 'ARCHIVED' && <ArchiveAction disabled={Boolean(busy)} onClick={() => void change(item, 'restore')}>Восстановить</ArchiveAction>}
         {item.state === 'RESTORED' && <ArchiveAction disabled={Boolean(busy)} onClick={() => void change(item, 'undo-restore')}>Отменить восстановление</ArchiveAction>}
-        {['ARCHIVED', 'RESTORED'].includes(item.state) && <ArchiveAction disabled={Boolean(busy)} onClick={() => void change(item, 'delete')}>Удалить файл и копию</ArchiveAction>}
+        {['ARCHIVED', 'RESTORED'].includes(item.state) && <>
+          <ArchiveAction disabled={Boolean(busy)} onClick={() => void change(item, 'delete')}>Удалить только этот файл</ArchiveAction>
+          <ArchiveAction disabled={Boolean(busy)} onClick={() => void change(item, 'delete', true)}>Удалить каскадно</ArchiveAction>
+        </>}
       </div>
     </details>)}</div>
     <Paging index={offset / PAGE_SIZE} busy={entries.loading} hasNext={entries.data?.nextOffset != null}

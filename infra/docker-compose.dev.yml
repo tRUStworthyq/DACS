@@ -116,6 +116,8 @@ services:
       dockerfile: deploy/Dockerfile
     container_name: core
     environment:
+      APP_FILESYSTEM_SOURCE_ROOT: /data/filesystem
+      APP_FILESYSTEM_ARCHIVE_ROOT: /data/filesystem-archive
       OLLAMA_BASE_URL: http://ollama:11434
       OLLAMA_MODEL: ${OLLAMA_MODEL:-dacs-qwen3}
       OLLAMA_CONTEXT_TOKENS: ${OLLAMA_CONTEXT_TOKENS:-8192}
@@ -132,6 +134,12 @@ services:
       KEYCLOAK_PORT: "8443" # 8080
     ports:
       - "8082:8082"
+    volumes:
+      - type: bind
+        source: ${DACS_FILESYSTEM_DIRECTORY:-G:/}
+        target: /data/filesystem
+        read_only: true
+      - filesystem_archive_data:/data/filesystem-archive
     depends_on:
       keycloak:
         condition: service_healthy
@@ -148,11 +156,17 @@ services:
     ports:
       - "8083:8083"
     environment:
+      AGENTS_FILESYSTEM_ROOT: /data/filesystem
       AGENTS_PII_ENABLED: ${AGENTS_PII_ENABLED:-false}
       AGENTS_PII_CHUNK_OVERLAP_CHARS: ${AGENTS_PII_CHUNK_OVERLAP_CHARS:-256}
       AGENTS_PII_MAX_SCAN_BYTES: ${AGENTS_PII_MAX_SCAN_BYTES:-104857600}
       AGENTS_PII_ENABLED_DETECTORS: ${AGENTS_PII_ENABLED_DETECTORS:-EMAIL,PHONE_RU,SNILS,INN_12,PASSPORT_RU}
       MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE: health,metrics
+    volumes:
+      - type: bind
+        source: ${DACS_FILESYSTEM_DIRECTORY:-G:/}
+        target: /data/filesystem
+        read_only: true
     depends_on:
       kafka:
         condition: service_healthy
@@ -289,6 +303,7 @@ services:
 volumes:
   keycloak_db_data:
   core_db_data:
+  filesystem_archive_data:
   kafka_data:
   minio_data:
   ollama_data:

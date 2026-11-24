@@ -12,6 +12,20 @@ docker compose -f infra/docker-compose.dev.yml up -d --build
 
 Open `http://localhost:8765/`. Gateway serves the UI and routes `/api/**` to Core using the browser's Gateway session. After sign-in through Keycloak, Gateway returns the current tab to `/`.
 
+## Collect from the filesystem
+
+Docker Compose mounts the host path in `DACS_FILESYSTEM_DIRECTORY` read-only into
+the agent. The current development Compose file defaults to `G:/`. If the agent
+runs outside Docker, set `AGENTS_FILESYSTEM_ROOT` to the
+directory it should scan. Use a dedicated directory containing files that users
+of this deployment are allowed to scan.
+
+In **Источники данных**, add a **Файловая система** connection. Enter a directory
+relative to the mounted root, such as `reports/2026`, or enter `.` to scan the
+entire root. Click **Запустить сбор** to collect metadata recursively. When
+scanning the root, the agent skips the Windows system directories
+`$RECYCLE.BIN` and `System Volume Information`.
+
 ## Run with Vite
 
 Requirements: Node.js 20+ and npm. Start the backend stack first. Gateway should be available at `http://localhost:8765`.
@@ -51,12 +65,14 @@ The browser sends requests to the Vite origin. The API client includes credentia
 
 The launch endpoint returns a `requestId` and opens the status view for that run. The run picker uses `GET /api/collect/{implId}/runs?offset=0&limit=25`, scoped to the selected connection and user. The UI polls run status while it is queued or running.
 
-### Reports, tree and archive
+### Document templates, dependencies and archive
 
-- File scores come from `GET /api/collect/runs/{requestId}/aging`.
-- Personal-data reports use `GET /api/collect/runs/{requestId}/pii/summary` and `/pii/files`.
-- The S3 tree uses the stored metadata endpoints under `/api/impls/{id}/s3/buckets`, one folder level and page at a time.
-- Archive actions use `/api/impls/{id}/s3/archive`. Creating a copy and deleting both the source and archive copy require explicit confirmation in the UI.
+- **Шаблоны документов** in the sidebar lists templates and provides create, edit, and delete actions. **Персональные данные** links to that screen and shows matches. All supplied conditions in a template are matched using case-insensitive substrings. Retention starts at the file's last modification and can be set in days or calendar years in UTC. Run collection again after creating or changing a content condition.
+- The agent detects links in text files, PDFs with extractable text or link annotations, and Office Open XML files. The graph resolves references within the selected collection. Limits are 1 MiB for plain text, 8 MiB for PDF or Office input, and 300 PDF pages. If evidence for a supported file is incomplete, S3 deletion is blocked for that collection.
+- **Косвенные связи** lists exact copies, documents with shared project, order or contract identifiers, and documents with shared text fragments. Similarity uses fingerprints from the selected collection and provides suggestions for review. The cascade follows direct references. Run a new collection to add fingerprints to older data.
+- S3 archive actions enforce retention against the latest completed collection. A document that links to a protected document is also protected against deletion. Cascade deletes incoming dependents along with the selected document. Each affected file must have an archive entry and appear in the confirmation.
+- The archive also accepts filesystem connections. Open a file in the dependency graph and choose **Архивировать**. Core validates it against the completed collection and writes a downloadable copy to `filesystem_archive_data`. The Compose mount for source files is read-only. Outside Compose, set `APP_FILESYSTEM_SOURCE_ROOT` to the same directory used by the agent and `APP_FILESYSTEM_ARCHIVE_ROOT` to a separate writable directory.
+- File scores come from `GET /api/collect/runs/{requestId}/aging`. The recommendation list omits files with insufficient scoring data and files whose personal-data detection results require review.
 
 ### Chats and messages
 
